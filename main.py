@@ -75,9 +75,8 @@ class PairiPlugin(Star):
 @command("牌理", alias=["pairi"])
 async def pairi(self, event: AstrMessageEvent, hand_str: str = ""):
     """
-    天凤牌理查询
+    天凤牌理查询 (支持副露残手)
     用法: /牌理 1109m228p12068s7z9m
-    （支持包含副露后的残余手牌，如 11, 10, 8, 7 张等）
     """
     if not MAHJONG_AVAILABLE:
         yield event.plain_result("⚠️ 插件缺少依赖 `mahjong`，请联系管理员安装。")
@@ -91,63 +90,91 @@ async def pairi(self, event: AstrMessageEvent, hand_str: str = ""):
     tiles_34 = self.parse_hand(hand_str)
     total_tiles = sum(tiles_34)
     
-    # 允许的手牌数：3n+1(摸牌前) 或 3n+2(摸牌后)
     if total_tiles % 3 not in [1, 2]:
-        yield event.plain_result(f"⚠️ 牌数错误！相公辣")
+        yield event.plain_result(f"⚠️ 牌数错误！当前解析到 {total_tiles} 张牌，非合法的麻将手牌数量（应为 3n+1 或 3n+2 张）。")
         return
         
     for count in tiles_34:
         if count > 4:
-            yield event.plain_result("⚠️ 你哪来的第二幅牌？")
+            yield event.plain_result("⚠️ 诈和警告：同一种牌不能超过 4 张！")
             return
 
-    # 2. 计算当前向听数 (并利用数学规律对副露进行修正)
-    raw_shanten = self.shanten_calculator.calculate_shanten(tiles_34)
-    
-    # 计算缺失的副露数
-    if total_tiles % 3 == 2:
-        missing_melds = (14 - total_tiles) // 3
-    else:
+    # 2. 补齐“替身面子 (Dummy Melds)”以满足底层 13/14 张牌的算法要求
+    dummy_indices =[]
+    missing_melds = 0
+    if total_tiles % 3 == 1:
         missing_melds = (13 - total_tiles) // 3
+    elif total_tiles % 3 == 2:
+        missing_melds = (14 - total_tiles) // 3
+
+    if missing_melds > 0:
+        # 优先使用手牌中完全没有的【字牌】作为替身面子（绝对不会产生顺子干涉）
+        for i in range(27, 34):
+            if tiles_34[i] == 0:
+                dummy_indices.append(i)
+                if len(dummy_indices) == missing_melds:
+                    break
         
-    # 修正：每少一个副露，原生算法会多算 2 向听
-    current_shanten = raw_shanten - (missing_melds * 2)
+        # 极端情况：字牌占满了，找边缘安全的数牌
+        if len(dummy_indices) < missing_melds:
+            for suit in range(3):
+                for num in range(9):
+                    idx = suit * 9 + num
+                    if tiles_34[idx] == 0:
+                        # 检查周边两格绝对安全（不会不小心凑成顺子）
+                        safe = True
+                        for delta in[-2, -1, 1, 2]:
+                            n_num = num + delta
+                            if 0 <= n_num <= 8:
+                                if tiles_34[suit * 9 + n_num] > 0:
+                                    safe = False
+                                    break
+                        if safe and idx not in dummy_indices:
+                            dummy_indices.append(idx)
+                            if len(dummy_indices) == missing_melds:
+                                break
+                if len(dummy_indices) == missing_melds:
+                    break
+                    
+        # 将替身面子注入到手牌中（底层库现在会看到完美的 13/14 张牌）
+        for idx in dummy_indices:
+            tiles_34[idx] = 3
+
+    # 3. 计算真实向听数
+    current_shanten = self.shanten_calculator.calculate_shanten(tiles_34)
     
     if current_shanten <= -1:
-        yield event.plain_result(f"已经和牌了！")
+        yield event.plain_result(f"🀄️ {hand_str}\n🎉 已经和牌了！")
         return
 
     shanten_str = f"{current_shanten}向听" if current_shanten > 0 else "听牌"
     result_lines =[f"🀄️ {hand_str} ({shanten_str})", "-" * 25]
 
-    # 3. 如果是 3n+2 张牌 (如 14, 11, 8张，需要打出一张)
+    # 4. 如果是 3n+2 张牌 (需要打出一张)
     if total_tiles % 3 == 2:
-        options = []
+        options =[]
         for discard_tile in range(34):
-            if tiles_34[discard_tile] == 0:
+            # 如果是本来就没有的牌，或者是我们塞进去的替身牌，不能打
+            if tiles_34[discard_tile] == 0 or discard_tile in dummy_indices:
                 continue
             
-            # 假设打出这张牌
             tiles_34[discard_tile] -= 1
-            
             ukeire =[]
             ukeire_count = 0
             
-            # 遍历牌山中剩余的所有牌
             for draw_tile in range(34):
-                if tiles_34[draw_tile] == 4:
+                # 替身牌不参与摸牌计算
+                if tiles_34[draw_tile] == 4 or draw_tile in dummy_indices:
                     continue 
                 
                 tiles_34[draw_tile] += 1
-                new_raw_shanten = self.shanten_calculator.calculate_shanten(tiles_34)
+                new_shanten = self.shanten_calculator.calculate_shanten(tiles_34)
                 tiles_34[draw_tile] -= 1
                 
-                # 比较原生向听数即可，因为不管有没有副露，进张导致的向听数相对下降是恒定的
-                if new_raw_shanten < raw_shanten:
+                if new_shanten < current_shanten:
                     ukeire.append(draw_tile)
                     ukeire_count += (4 - tiles_34[draw_tile])
             
-            # 将打出的牌拿回来
             tiles_34[discard_tile] += 1
             
             if ukeire:
@@ -157,7 +184,6 @@ async def pairi(self, event: AstrMessageEvent, hand_str: str = ""):
                     "count": ukeire_count
                 })
         
-        # 按进张枚数降序排列
         options.sort(key=lambda x: x["count"], reverse=True)
         
         if not options:
@@ -168,19 +194,19 @@ async def pairi(self, event: AstrMessageEvent, hand_str: str = ""):
                 ukeire_str = self.format_tiles(opt['ukeire'])
                 result_lines.append(f"打{discard_str} 摸[{ukeire_str} {opt['count']}枚]")
 
-    # 4. 如果是 3n+1 张牌 (如 13, 10, 7张，需要摸进一张)
+    # 5. 如果是 3n+1 张牌 (需要摸进一张)
     else:
         ukeire =[]
         ukeire_count = 0
         for draw_tile in range(34):
-            if tiles_34[draw_tile] == 4:
+            if tiles_34[draw_tile] == 4 or draw_tile in dummy_indices:
                 continue
             
             tiles_34[draw_tile] += 1
-            new_raw_shanten = self.shanten_calculator.calculate_shanten(tiles_34)
+            new_shanten = self.shanten_calculator.calculate_shanten(tiles_34)
             tiles_34[draw_tile] -= 1
             
-            if new_raw_shanten < raw_shanten:
+            if new_shanten < current_shanten:
                 ukeire.append(draw_tile)
                 ukeire_count += (4 - tiles_34[draw_tile])
         
