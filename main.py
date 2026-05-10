@@ -91,12 +91,12 @@ async def pairi(self, event: AstrMessageEvent, hand_str: str = ""):
     total_tiles = sum(tiles_34)
     
     if total_tiles % 3 not in [1, 2]:
-        yield event.plain_result(f"⚠️ 牌数错误！当前解析到 {total_tiles} 张牌，非合法的麻将手牌数量（应为 3n+1 或 3n+2 张）。")
+        yield event.plain_result(f"⚠️ 牌数错误！相公辣！")
         return
         
     for count in tiles_34:
         if count > 4:
-            yield event.plain_result("⚠️ 诈和警告：同一种牌不能超过 4 张！")
+            yield event.plain_result("⚠️ 你哪来的第二幅牌？")
             return
 
     # 2. 补齐“替身面子 (Dummy Melds)”以满足底层 13/14 张牌的算法要求
